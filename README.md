@@ -7,7 +7,7 @@ Code accompanying:
 > *International Journal of Engineering and Geosciences (IJEG).*
 
 **Data:** the datasets are released separately on Mendeley Data (reserved DOI
-`[10.17632/f6d29w5zjk.1 — inserted on deposit]`). This repository holds only code.
+`[10.17632/f6d29w5zjk.1]`). This repository holds only code.
 **License:** MIT (this code). The dataset is CC-BY-4.0. **Seeds fixed** (SEED = 42; bootstrap seed 12345).
 
 This is an **audit** of validation design, not a model-maximization. The headline finding — a large
