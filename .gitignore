@@ -1,0 +1,20 @@
+# secrets / credentials — NEVER commit
+keys/
+*.json.key
+*.pem
+.env
+.cdsapirc
+service_account*.json
+
+# caches / build
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# large data & outputs (obtain data from the Mendeley deposit; see README)
+data/
+outputs/
+*.parquet
+*.tif
+*.zip
+

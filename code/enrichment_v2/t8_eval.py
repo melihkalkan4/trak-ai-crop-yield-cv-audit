@@ -1,0 +1,154 @@
+"""T8 — Re-run full CV evaluation on the enriched tiers (copied harness; outputs to WORKDIR).
+
+Uses the copied harness (harness.py = faithful cp25 CV/model code; harness_clusters.py = cluster-aware
+bootstrap). Logic unchanged; only data (enriched tiers, T7-selected features) and output paths differ.
+Per crop × tier × model: LOYO/LOILO/Spatiotemporal out-of-fold metrics; matched climatology SS (LOYO)
+with year-clustered CI; spatial-temporal gap ΔR²=R²_LOILO−R²_LOYO (year-block bootstrap + year-level
+signed-rank); per-algorithm matched ablation (tier vs A); rolling-origin forward skill.
+Outputs: outputs/master_ledger_v2.csv, gap_v2.csv, ablation_v2.csv, rolling_origin_v2.csv
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy.stats import wilcoxon
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ev2_common as E
+import harness as H
+import harness_clusters as HC
+
+MODELS = ["pls", "elastic_net", "random_forest", "xgboost", "gpr"]
+KEYS = ["ilce_id", "ilce", "il", "year"]
+
+
+def b0_loo(df):
+    """Per-ilce leave-one-out climatology prediction aligned to df rows."""
+    pred = np.full(len(df), np.nan)
+    for _, idxs in df.groupby("ilce_id").groups.items():
+        idxs = list(idxs)
+        vals = df.loc[idxs, "verim_kg_da"].astype(float)
+        tot, n = vals.sum(), len(vals)
+        for i in idxs:
+            pred[df.index.get_loc(i)] = (tot - df.loc[i, "verim_kg_da"]) / (n - 1) if n > 1 else vals.mean()
+    return pred
+
+
+def rolling_origin(df, feats, min_train=4):
+    sub = df.sort_values("year").reset_index(drop=True)
+    years = sorted(sub.year.unique())
+    test_years = [y for y in years if y - years[0] >= min_train]
+    out = []
+    for Y in test_years:
+        tr, te = sub[sub.year < Y], sub[sub.year == Y]
+        if len(tr) < 20 or te.empty:
+            continue
+        Xtr = H._impute(tr[feats].astype(float)); Xte = tr[feats].astype(float)
+        med = Xtr.median()
+        Xte = te[feats].astype(float).replace([np.inf, -np.inf], np.nan).fillna(med).fillna(0.0)
+        ytr, yte = tr.verim_kg_da.values, te.verim_kg_da.values
+        clim = te.ilce_id.map(tr.groupby("ilce_id").verim_kg_da.mean()).fillna(ytr.mean()).values
+        crmse = np.sqrt(mean_squared_error(yte, clim))
+        best = None
+        for m in MODELS:
+            mm = H._make_model(m)
+            if m in H._NEEDS_SCALER:
+                sc = StandardScaler().fit(Xtr); a, b = sc.transform(Xtr), sc.transform(Xte)
+            else:
+                a, b = Xtr.values, Xte.values
+            pred = mm.fit(a, ytr).predict(b).ravel()
+            ss = 1 - np.sqrt(mean_squared_error(yte, pred)) / crmse if crmse > 0 else np.nan
+            if best is None or ss > best[1]:
+                best = (m, ss)
+        out.append(best[1])
+    return float(np.nanmean(out)) if out else np.nan, len(out)
+
+
+def main():
+    sel = json.loads((E.OUT / "selected_features.json").read_text(encoding="utf-8"))
+    led, gap_rows, roll_rows = [], [], []
+    preds_cache = {}  # (crop,tier,model,cv) -> (y, preds, df)
+    for crop in ("bugday", "aycicegi"):
+        for tier in ("A", "B", "C", "D"):
+            df = pd.read_csv(E.OUT / f"tier_{tier}_{crop}.csv").reset_index(drop=True)
+            feats = sel[crop][tier]
+            X = H._impute(df[feats].astype(float))
+            y = df["verim_kg_da"].astype(float).values
+            grp = {"LOYO": df.year.astype(int).values, "LOILO": df.ilce_id.astype(int).values,
+                   "Spatiotemporal": H._block_groups(df)}
+            b0 = b0_loo(df)
+            rmse_b0 = float(np.sqrt(mean_squared_error(y, b0)))
+            for m in MODELS:
+                for cv in ("LOYO", "LOILO", "Spatiotemporal"):
+                    preds = H._cv_predict(m, X, y, grp[cv])
+                    preds_cache[(crop, tier, m, cv)] = preds
+                    r2 = float(r2_score(y, preds)); rmse = float(np.sqrt(mean_squared_error(y, preds)))
+                    row = dict(crop=crop, tier=tier, model=m, cv=cv, n=len(y),
+                               r2=round(r2, 4), rmse=round(rmse, 3),
+                               mae=round(float(np.mean(np.abs(y - preds))), 3))
+                    if cv == "LOYO":
+                        ss = 1 - rmse / rmse_b0 if rmse_b0 > 0 else np.nan
+                        clo, chi = HC.ci95(HC.boot_ss_cluster(y, preds, b0, df.year.astype(int).values))
+                        row.update(baseline_rmse_matched=round(rmse_b0, 3), skill_score=round(ss, 4),
+                                   ss_ci_low_clustered=round(clo, 4), ss_ci_high_clustered=round(chi, 4))
+                    led.append(row)
+                # gap per model: LOILO - LOYO
+                pl, pi = preds_cache[(crop, tier, m, "LOYO")], preds_cache[(crop, tier, m, "LOILO")]
+                dr2 = float(r2_score(y, pi) - r2_score(y, pl))
+                dvals = HC.rc.boot_paired_dr2(y, pl, pi, HC.N_BOOT, HC.SEED)
+                glo, ghi = HC.ci95(dvals)
+                # year-level signed-rank on |err|
+                dd = pd.DataFrame({"year": df.year.values, "ael": np.abs(y - pl), "aei": np.abs(y - pi)})
+                per = dd.groupby("year").mean()
+                try:
+                    W, p = wilcoxon(per.ael, per.aei, alternative="two-sided"); p = float(p)
+                except Exception:
+                    p = np.nan
+                gap_rows.append(dict(crop=crop, tier=tier, model=m,
+                                     r2_LOYO=round(float(r2_score(y, pl)), 4),
+                                     r2_LOILO=round(float(r2_score(y, pi)), 4),
+                                     gap_dR2=round(dr2, 4), gap_ci_low=round(glo, 4),
+                                     gap_ci_high=round(ghi, 4), year_signrank_p=round(p, 4) if p == p else np.nan))
+            mean_ss, nyr = rolling_origin(df, feats)
+            roll_rows.append(dict(crop=crop, tier=tier, n_test_years=nyr,
+                                  rolling_mean_skill_vs_clim=round(mean_ss, 4) if mean_ss == mean_ss else np.nan))
+            print(f"[t8] {crop} tier {tier} done", flush=True)
+
+    leddf = pd.DataFrame(led)
+    leddf.to_csv(E.OUT / "master_ledger_v2.csv", index=False)
+    pd.DataFrame(gap_rows).to_csv(E.OUT / "gap_v2.csv", index=False)
+    pd.DataFrame(roll_rows).to_csv(E.OUT / "rolling_origin_v2.csv", index=False)
+
+    # per-algorithm matched ablation: ΔR²(tier vs A), per crop×model×cv
+    abl = []
+    base = leddf[leddf.tier == "A"].set_index(["crop", "model", "cv"])["r2"]
+    for _, r in leddf[leddf.tier != "A"].iterrows():
+        try:
+            a = base.loc[(r.crop, r.model, r.cv)]
+            abl.append(dict(crop=r.crop, tier=r.tier, model=r.model, cv=r.cv,
+                            r2_tierA=round(float(a), 4), r2_tier=r.r2, delta_r2_vs_A=round(r.r2 - float(a), 4)))
+        except KeyError:
+            pass
+    pd.DataFrame(abl).to_csv(E.OUT / "ablation_v2.csv", index=False)
+    print(f"[t8] saved master_ledger_v2 ({len(leddf)}), gap_v2, ablation_v2, rolling_origin_v2", flush=True)
+    # headline: LOYO SS best per crop×tier
+    print("\n=== LOYO skill vs matched climatology (best model per tier) ===", flush=True)
+    loyo = leddf[leddf.cv == "LOYO"].dropna(subset=["skill_score"])
+    for crop in ("bugday", "aycicegi"):
+        for tier in ("A", "B", "C", "D"):
+            s = loyo[(loyo.crop == crop) & (loyo.tier == tier)]
+            if s.empty:
+                continue
+            b = s.loc[s.skill_score.idxmax()]
+            print(f"  {crop} {tier}: best={b.model} SS={b.skill_score:+.3f} "
+                  f"clustCI[{b.ss_ci_low_clustered:+.3f},{b.ss_ci_high_clustered:+.3f}]", flush=True)
+
+
+if __name__ == "__main__":
+    main()

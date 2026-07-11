@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the article and the dataset."
+title: "Spatial skill is not temporal skill — reproducibility code"
+authors:
+  - family-names: Kalkan
+    given-names: Melih
+    affiliation: "Işık University, Department of Management Information Systems, İstanbul, Türkiye"
+    orcid: "https://orcid.org/0009-0004-7719-5333"
+  - family-names: Çavdaroğlu
+    given-names: Gülsüm Çiğdem
+    affiliation: "Işık University, Department of Management Information Systems, İstanbul, Türkiye"
+license: MIT
+version: "1.0.0"
+date-released: "2026-07-11"
+preferred-citation:
+  type: article
+  title: "Spatial skill is not temporal skill: a cross-validation audit of satellite-driven winter-wheat and sunflower yield prediction in Trakya, Türkiye"
+  authors:
+    - family-names: Kalkan
+      given-names: Melih
+    - family-names: Çavdaroğlu
+      given-names: Gülsüm Çiğdem
+  journal: "International Journal of Engineering and Geosciences"
+  year: 2026
+  notes: "DOI to be assigned on publication."
